@@ -82,6 +82,9 @@
   #modal .box { background: var(--paper); max-width: 400px; width: 100%; padding: 26px; border-radius: 4px; position: relative; }
   #modal .x { position: absolute; top: 8px; right: 10px; border: 0; background: none; font-size: 22px; padding: 2px 8px; }
 
+  #pushbar { display: none; background: var(--paper); border-bottom: 1px solid var(--line); padding: 10px 20px; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap; }
+  #pushbar.on { display: flex; }
+  #pushbar .pb-btns { display: inline-flex; gap: 12px; align-items: center; }
   /* Tech drawer */
   #tabtn { position: fixed; right: 16px; bottom: 16px; z-index: 60; background: #12151a; color: #e6eaf0; border-color: #12151a; }
   #drawer { position: fixed; top: 0; right: 0; bottom: 0; width: 420px; max-width: 100%; background: #12151a; color: #d7dde5; z-index: 55; transform: translateX(100%); transition: transform .2s; display: flex; flex-direction: column; font-size: 13px; }
@@ -116,6 +119,11 @@
     <a class="cartlink" href="#/cart">Cart<b id="cartcount">0</b></a>
   </nav>
 </div></header>
+
+<div id="pushbar" role="region" aria-label="Notifications">
+  <span>Get order updates and offers as notifications?</span>
+  <span class="pb-btns"><button class="primary" data-act="pushYes">Turn on</button> <button class="link" data-act="pushLater">Not now</button></span>
+</div>
 
 <main id="app"></main>
 
@@ -198,6 +206,7 @@
       <label class="check"><input type="checkbox" id="cAlsoPurchase"> Also call logPurchase on order (revenue)</label>
       <label class="check"><input type="checkbox" id="cVerbose"> Verbose SDK logging</label>
       <label class="check"><input type="checkbox" id="cAllowJs"> Allow HTML in-app messages (allowUserSuppliedJavascript)</label>
+      <label class="check"><input type="checkbox" id="cPushPrompt"> Show web push opt-in banner (soft ask before the browser prompt)</label>
       <div class="row" style="margin-top:6px">
         <label class="check" style="flex:0 0 auto"><input type="checkbox" id="cPopup"> Show opt-in popup after</label>
         <label style="flex:0 0 80px"><input type="number" id="cPopupDelay" min="1"></label>
@@ -205,6 +214,17 @@
       </div>
       <div class="row"><button class="primary" data-act="saveReload">Save and reload</button></div>
       <p class="hint">Settings live in this browser's localStorage. Use a different port per workspace.</p>
+    </div>
+
+    <div class="sec">
+      <h3>Web push</h3>
+      <div class="row">
+        <button data-act="pushState">Check state</button>
+        <button data-act="pushAsk">Request permission</button>
+        <button data-act="pushOff">Unregister</button>
+        <button data-act="pushBar">Show opt-in banner</button>
+      </div>
+      <p class="hint">Needs https or localhost, and service-worker.js at the path set above. The banner only appears automatically when the setting above is ticked.</p>
     </div>
 
     <div class="sec">
@@ -259,7 +279,7 @@
 
   /* ---------- state ---------- */
   const CFG_KEY = "bz-shop-cfg", CART_KEY = "bz-shop-cart";
-  const DEFAULT_CFG = { apiKey: "", baseUrl: "", sdkVersion: "7.1", swPath: new URL("service-worker.js", location.href).pathname, currency: "AUD", prefix: "ecommerce.", flushEach: true, alsoPurchase: false, verbose: true, popup: false, popupDelay: 8, emailGroup: "", smsGroup: "", initId: "", codeFormat: "esm", ecomMethod: "auto", allowJs: false };
+  const DEFAULT_CFG = { apiKey: "", baseUrl: "", sdkVersion: "7.1", swPath: new URL("service-worker.js", location.href).pathname, currency: "AUD", prefix: "ecommerce.", flushEach: true, alsoPurchase: false, verbose: true, popup: false, popupDelay: 8, emailGroup: "", smsGroup: "", initId: "", codeFormat: "esm", ecomMethod: "auto", allowJs: false, pushPrompt: false };
   const rid = p => p + "_" + Math.random().toString(36).slice(2, 10);
   function read(key, fallback) { try { return Object.assign({}, fallback, JSON.parse(localStorage.getItem(key) || "{}")); } catch (e) { return Object.assign({}, fallback); } }
   const cfg = read(CFG_KEY, DEFAULT_CFG);
@@ -346,6 +366,7 @@
         return IMPORT_LINE + '\n\n' + init;
       });
       paintCompat();
+      if (cfg.pushPrompt && !pushDismissed()) showPushBar();
       if (typeof braze.isDisabled === "function" && braze.isDisabled()) log("The SDK is disabled (disableSDK or logout). Click enableSDK to resume.", "err");
       checkServiceWorker();
       queue.splice(0).forEach(([fn, label, code]) => bz(fn, label, code));
@@ -363,7 +384,27 @@
       if (!m) return log("Could not read a version from " + cfg.swPath, "dim");
       if (m[1] !== cfg.sdkVersion) log("Service worker loads SDK " + m[1] + " but the page uses " + cfg.sdkVersion + ". Update service-worker.js so they match.", "err");
       else log("Service worker version matches (" + m[1] + ")", "dim");
-    }).catch(e => log("Service worker check skipped: " + e.message, "dim"));
+    }).catch(e => /^HTTP 404/.test(e.message)
+      ? log("service-worker.js was not found at " + cfg.swPath + " (404), so push registration will fail. Expected: " + new URL("service-worker.js", location.href).pathname + ". Fix the Service worker path in the Tech panel and click Save and reload.", "err")
+      : log("Service worker check skipped: " + e.message, "dim"));
+  }
+  const PUSH_CODE = "// Needs HTTPS (or localhost) and service-worker.js at the path in serviceWorkerLocation\n" +
+    "if (braze.isPushSupported() && !braze.isPushPermissionGranted() && !braze.isPushBlocked()) {\n  braze.requestPushPermission();\n}";
+  const pushDismissed = () => { try { return !!sessionStorage.getItem("bz-push-dismissed"); } catch (e) { return false; } };
+  function pushEligible() {
+    return ready && typeof braze.isPushSupported === "function" && braze.isPushSupported() && !braze.isPushPermissionGranted() && !braze.isPushBlocked();
+  }
+  function showPushBar() {
+    if (!ready) return log("SDK not ready", "err");
+    if (!pushEligible()) return log("Push banner not shown: push is unsupported here, already granted, or blocked.", "dim");
+    $("#pushbar").classList.add("on");
+  }
+  function requestPush() {
+    if (!ready) return log("SDK not ready", "err");
+    log("requestPushPermission()", "ok", undefined, PUSH_CODE);
+    braze.requestPushPermission(
+      () => { log("Push permission granted. Registering with Braze.", "ok"); toast("Notifications on"); setTimeout(refreshIds, 800); },
+      denied => log("Push permission denied or dismissed" + (denied ? " (temporary: the browser may ask again)" : ""), "err"));
   }
   function refreshIds() {
     if (!ready) return;
@@ -579,6 +620,25 @@
       if (r && typeof r.then === "function") r.then(() => log("logout() finished", "ok"), e => log("logout() failed: " + (e && e.message || e), "err"));
     },
     enable() { if (!ready) return log("SDK not ready", "err"); braze.enableSDK(); log("enableSDK()", "ok", undefined, "braze.enableSDK();"); refreshIds(); },
+    pushState() {
+      if (!ready) return log("SDK not ready", "err");
+      log("Push state", "ok", {
+        secureContext: window.isSecureContext,
+        supported: braze.isPushSupported(),
+        granted: braze.isPushPermissionGranted(),
+        blocked: braze.isPushBlocked(),
+        notificationPermission: window.Notification ? Notification.permission : "n/a"
+      }, "console.log({\n  supported: braze.isPushSupported(),\n  granted: braze.isPushPermissionGranted(),\n  blocked: braze.isPushBlocked()\n});");
+    },
+    pushAsk() { requestPush(); },
+    pushYes() { $("#pushbar").classList.remove("on"); requestPush(); },
+    pushLater() { $("#pushbar").classList.remove("on"); try { sessionStorage.setItem("bz-push-dismissed", "1"); } catch (e) {} log("Push banner dismissed for this session", "dim"); },
+    pushBar() { showPushBar(); },
+    pushOff() {
+      if (!ready) return log("SDK not ready", "err");
+      braze.unregisterPush(() => log("Push unregistered", "ok"), () => log("Unregister failed", "err"));
+      log("unregisterPush()", "ok", undefined, "braze.unregisterPush();");
+    },
     clearLog() { logEl.textContent = ""; codes.length = 0; },
     copy(t) {
       const c = codes[Number(t.dataset.i)]; if (!c) return;
@@ -596,7 +656,7 @@
       cfg.swPath = g("cSwPath").value.trim() || DEFAULT_CFG.swPath; cfg.currency = g("cCurrency").value.trim() || "AUD";
       cfg.emailGroup = g("cEmailGroup").value.trim(); cfg.smsGroup = g("cSmsGroup").value.trim(); cfg.initId = g("cInitId").value.trim();
       cfg.prefix = g("cPrefix").value; cfg.ecomMethod = g("cEcomMethod").value; cfg.flushEach = g("cFlushEach").checked; cfg.alsoPurchase = g("cAlsoPurchase").checked; cfg.verbose = g("cVerbose").checked; cfg.allowJs = g("cAllowJs").checked;
-      cfg.popup = g("cPopup").checked; cfg.popupDelay = Number(g("cPopupDelay").value) || 8;
+      cfg.popup = g("cPopup").checked; cfg.pushPrompt = g("cPushPrompt").checked; cfg.popupDelay = Number(g("cPopupDelay").value) || 8;
       try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) {}
       location.reload();
     }
@@ -639,7 +699,7 @@
     const set = (id, v) => { $("#" + id).value = v; };
     set("cApiKey", cfg.apiKey); set("cBaseUrl", cfg.baseUrl); set("cSdkVersion", cfg.sdkVersion); set("cSwPath", cfg.swPath); set("cCurrency", cfg.currency);
     set("cEmailGroup", cfg.emailGroup); set("cSmsGroup", cfg.smsGroup); set("cInitId", cfg.initId); set("cPrefix", cfg.prefix); set("cEcomMethod", cfg.ecomMethod); set("cPopupDelay", cfg.popupDelay);
-    $("#cFlushEach").checked = !!cfg.flushEach; $("#cAlsoPurchase").checked = !!cfg.alsoPurchase; $("#cVerbose").checked = !!cfg.verbose; $("#cAllowJs").checked = !!cfg.allowJs; $("#cPopup").checked = !!cfg.popup;
+    $("#cFlushEach").checked = !!cfg.flushEach; $("#cAlsoPurchase").checked = !!cfg.alsoPurchase; $("#cVerbose").checked = !!cfg.verbose; $("#cAllowJs").checked = !!cfg.allowJs; $("#cPopup").checked = !!cfg.popup; $("#cPushPrompt").checked = !!cfg.pushPrompt;
   }
   fillDrawer(); paintCart();
   $("#cCodeFormat").value = cfg.codeFormat;
